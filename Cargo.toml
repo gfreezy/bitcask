@@ -1,0 +1,8 @@
+[package]
+name = "bitcask"
+version = "0.1.0"
+authors = ["Alex.F <gfreezy@gmail.com>"]
+
+[dependencies]
+byteorder = "0.5.1"
+nix = "0.5.0"
