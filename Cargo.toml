@@ -6,3 +6,4 @@ authors = ["Alex.F <gfreezy@gmail.com>"]
 [dependencies]
 byteorder = "0.5.1"
 nix = "0.5.0"
+time = "0.1.35"
