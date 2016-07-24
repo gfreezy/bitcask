@@ -6,7 +6,6 @@ use std::io::Seek;
 use std::io::{Read, Write};
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
-use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
 
@@ -31,48 +30,35 @@ pub struct DataEntry {
 
 impl DataFile {
     pub fn new<P: AsRef<Path>>(path: P, file_id: u32, write_offset: Option<u64>) -> DataFile {
+        let file_path = path.as_ref().join(format!("{}.data", file_id));
         let mut open_options = OpenOptions::new();
         open_options.read(true);
-        let file = match write_offset {
-            None => open_options.open(&path),
-            Some(_) => open_options.write(true).create(true).truncate(true).open(&path),
+        let mut file = match write_offset {
+            None => open_options.open(&file_path),
+            Some(_) => {
+                open_options.create(true).append(true).open(&file_path)
+            }
+        }.expect(&format!("open data file {}/{}", path.as_ref().to_string_lossy(), file_id));
+
+        let new_offset = if write_offset.is_some() {
+            Some(file.seek(std::io::SeekFrom::Current(0)).expect("seek file end"))
+        } else {
+            write_offset
         };
 
         DataFile {
-            file: file.unwrap(),
+            file: file,
             file_id: file_id,
-            write_offset: write_offset,
+            write_offset: new_offset,
         }
     }
 
-    pub fn is_readonly(&self) -> bool {
+    fn is_readonly(&self) -> bool {
         return self.write_offset.is_none()
     }
 
-    pub fn read(&mut self, offset: u32, data_entry: &mut DataEntry) -> Result<(), String> {
-        if let Err(_) = self.file.seek(std::io::SeekFrom::Start(offset as u64)) {
-            panic!("seek")
-        }
-
-        data_entry.crc = self.file.read_u16::<LittleEndian>().expect("read crc");
-        data_entry.timestamp = self.file.read_u32::<LittleEndian>().expect("read timestamp");
-        let mut buf = [0;1];
-        self.file.read(&mut buf).expect("read key size");
-        data_entry.key_size = buf[0];
-        data_entry.value_size = self.file.read_u32::<LittleEndian>().expect("read value size");
-
-        let mut key_buf = vec![0; data_entry.key_size as usize];
-        self.file.read_exact(&mut key_buf).expect("read key");
-        data_entry.key = key_buf;
-        let mut value_buf = vec![0; data_entry.value_size as usize];
-        self.file.read_exact(&mut value_buf).expect("read value");
-        data_entry.value = value_buf;
-
-        Ok(())
-    }
-
-    pub fn read_exact(&mut self, value_offse: u32, value: &mut [u8]) -> Result<(), String> {
-        if let Err(_) = self.file.seek(std::io::SeekFrom::Start(value_offse as u64)) {
+    pub fn read_exact(&mut self, value_offse: u64, value: &mut [u8]) -> Result<(), String> {
+        if let Err(_) = self.file.seek(std::io::SeekFrom::Start(value_offse)) {
             panic!("seek")
         }
 
@@ -89,25 +75,43 @@ impl DataFile {
         if let Err(_) = self.file.seek(std::io::SeekFrom::End(0)) {
             panic!("seek end")
         }
-        let mut buf = [0; 11];
-        LittleEndian::write_u16(&mut buf, data_entry.crc);
-        LittleEndian::write_u32(&mut buf[2..], data_entry.timestamp);
-        buf[6] = data_entry.key_size;
-        LittleEndian::write_u32(&mut buf[7..], data_entry.value_size);
-
-        match self.file.write(&buf[..11]) {
-            Err(_) => return Err("error write1".to_owned()),
-            Ok(size) => {
-                if size != 11 {
-                    return Err("error write2".to_owned());
-                }
-            }
-        };
+        self.file.write_u16::<LittleEndian>(data_entry.crc).expect("write crc");
+        self.file.write_u32::<LittleEndian>(data_entry.timestamp).expect("write timestamp");
+        self.file.write(&[data_entry.key_size]).expect("write key size");
+        self.file.write_u32::<LittleEndian>(data_entry.value_size).expect("write value size");
         self.file.write_all(&data_entry.key).expect("write key");
         let value_pos = self.file.seek(std::io::SeekFrom::Current(0)).expect("seek current position");
         self.file.write_all(data_entry.value.as_slice()).expect("write value");
+        self.file.flush().expect("flush");
 
         Ok(value_pos)
+    }
+}
+
+
+impl Iterator for DataFile {
+    type Item = DataEntry;
+    fn next(&mut self) -> Option<DataEntry> {
+        let crc = self.file.read_u16::<LittleEndian>().expect("read crc");
+        let timestamp = self.file.read_u32::<LittleEndian>().expect("read timestamp");
+        let mut buf = [0; 1];
+        self.file.read(&mut buf).expect("read key size");
+        let key_size = buf[0];
+        let value_size = self.file.read_u32::<LittleEndian>().expect("read value size");
+
+        let mut key = vec![0; key_size as usize];
+        self.file.read_exact(&mut key).expect("read key");
+        let mut value = vec![0; value_size as usize];
+        self.file.read_exact(&mut value).expect("read value");
+
+        Some(DataEntry {
+            crc: crc,
+            timestamp: timestamp,
+            key_size: key_size,
+            value_size: value_size,
+            key: key,
+            value: value,
+        })
     }
 }
 
@@ -115,10 +119,10 @@ impl DataFile {
 #[test]
 fn test_write() {
     {
-        let mut db = DataFile::new("test.db".to_owned(), 10, Some(0));
+        let mut db = DataFile::new(".".to_owned(), 10, Some(0));
         let value = "你好".as_bytes().to_vec();
         let key = "哈哈".as_bytes().to_vec();
-        let entry = DataEntry{
+        let entry = DataEntry {
             crc: 1,
             timestamp: 1,
             key_size: key.len() as u8,
@@ -131,8 +135,8 @@ fn test_write() {
         assert!(db.write(&entry).is_ok());
     }
     {
-        let mut db = DataFile::new("test.db".to_owned(), 10, None);
-        let mut entry = DataEntry{
+        let mut db = DataFile::new(".".to_owned(), 10, None);
+        let mut entry = DataEntry {
             crc: 1,
             timestamp: 1,
             key_size: 2,
@@ -140,8 +144,8 @@ fn test_write() {
             key: Vec::new(),
             value: Vec::new(),
         };
-        let ret = db.read(0, &mut entry);
-        assert!(ret.is_ok());
+        let ret = db.next();
+        assert!(ret.is_some());
         println!("read: {:?}", entry);
     }
 }

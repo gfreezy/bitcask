@@ -6,7 +6,6 @@ use std::io::Seek;
 use std::io::{Read, Write};
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
-use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
 
@@ -30,21 +29,30 @@ pub struct HintEntry {
 
 impl HintFile {
     pub fn new<P: AsRef<Path>>(path: P, file_id: u32, write_offset: Option<u64>) -> HintFile {
+        let file_path = path.as_ref().join(format!("{}.hint", file_id));
         let mut open_options = OpenOptions::new();
         open_options.read(true);
-        let file = match write_offset {
-            None => open_options.open(&path),
-            Some(_) => open_options.write(true).create(true).truncate(true).open(&path),
+        let mut file = match write_offset {
+            None => open_options.open(&file_path),
+            Some(_) => {
+                open_options.create(true).append(true).open(&file_path)
+            }
+        }.expect(&format!("open data file {}/{}", path.as_ref().to_string_lossy(), file_id));
+
+        let new_offset = if write_offset.is_some() {
+            Some(file.seek(std::io::SeekFrom::Current(0)).expect("seek file end"))
+        } else {
+            write_offset
         };
 
         HintFile {
-            file: file.unwrap(),
+            file: file,
             file_id: file_id,
-            write_offset: write_offset,
+            write_offset: new_offset,
         }
     }
 
-    pub fn is_readonly(&self) -> bool {
+    fn is_readonly(&self) -> bool {
         return self.write_offset.is_none()
     }
 
@@ -61,6 +69,7 @@ impl HintFile {
         self.file.write_u32::<LittleEndian>(hint_entry.value_size).expect("write value size");
         self.file.write_u64::<LittleEndian>(hint_entry.value_pos).expect("write value pos");
         self.file.write_all(&hint_entry.key).expect("write key");
+        self.file.flush().expect("flush");
 
         Ok(())
     }
@@ -79,7 +88,7 @@ impl Iterator for HintFile {
             Ok(_) => key_buf[0],
             Err(_) => return None
         };
-        let value_size = match self.file.read_u32::<LittleEndian>(){
+        let value_size = match self.file.read_u32::<LittleEndian>() {
             Ok(v) => v,
             Err(_) => return None
         };
@@ -92,7 +101,7 @@ impl Iterator for HintFile {
             return None;
         }
 
-        Some(HintEntry{
+        Some(HintEntry {
             timestamp: timestamp,
             key_size: key_size,
             value_size: value_size,
@@ -104,12 +113,12 @@ impl Iterator for HintFile {
 
 
 #[test]
-fn test_write() {
+fn test_read_write() {
     {
-        let mut db = HintFile::new("test.hint".to_owned(), 0, Some(0));
+        let mut db = HintFile::new(".".to_owned(), 0, Some(0));
         let value = "你好".as_bytes().to_vec();
         let key = "哈哈".as_bytes().to_vec();
-        let entry = HintEntry{
+        let entry = HintEntry {
             timestamp: 1,
             key_size: key.len() as u8,
             value_size: value.len() as u32,
@@ -121,7 +130,7 @@ fn test_write() {
         assert!(db.write(&entry).is_ok());
     }
     {
-        let db = HintFile::new("test.hint".to_owned(), 0, None);
+        let db = HintFile::new(".".to_owned(), 0, None);
         for entry in db {
             println!("read {:?}", entry);
         }

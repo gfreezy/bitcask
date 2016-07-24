@@ -7,3 +7,5 @@ authors = ["Alex.F <gfreezy@gmail.com>"]
 byteorder = "0.5.1"
 nix = "0.5.0"
 time = "0.1.35"
+memcached-protocal = "0.1.11"
+error-chain = "0.2"
